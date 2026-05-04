@@ -9,6 +9,13 @@ import { AxiosError } from 'axios';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 
+// Interfaces para tipar las respuestas de la API externa
+interface TransactionResponse {
+  id: string;
+  status: string;
+  [key: string]: unknown;
+}
+
 interface RegisterTransactionDto {
   cbuOrigen: string;
   cbuDestino: string;
@@ -39,26 +46,23 @@ export class CentralBankService {
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
   ) {
-    this.centralBankApiUrl = this.configService.get<string>(
-      'CENTRAL_BANK_API_URL',
-    );
-    this.centralBankApiKey = this.configService.get<string>(
-      'CENTRAL_BANK_API_KEY',
-    );
+    // CORRECCIÓN: Nombres de variables según tu archivo .env
+    this.centralBankApiUrl =
+      this.configService.get<string>('CENTRAL_BANK_URL') ?? '';
+    
+    this.centralBankApiKey =
+      this.configService.get<string>('CENTRAL_BANK_API_KEY') ?? '';
+    
+    // CORRECCIÓN: En tu .env es CENTRAL_BANK_ENV, no CENTRAL_BANK_ENVIRONMENT
     this.centralBankEnvironment = this.configService.get<string>(
-      'CENTRAL_BANK_ENVIRONMENT',
+      'CENTRAL_BANK_ENV',
       'test',
-    ); // Default a 'test'
+    );
 
-    if (!this.centralBankApiUrl) {
+    if (!this.centralBankApiUrl || !this.centralBankApiKey) {
+      console.error('❌ Error de Configuración: URL o API_KEY no encontradas en .env');
       throw new Error(
-        'Config Error: CENTRAL_BANK_API_URL is undefined. Check your .env file.',
-      );
-    }
-
-    if (!this.centralBankApiKey) {
-      throw new Error(
-        'Config Error: CENTRAL_BANK_API_KEY is undefined. Check your .env file.',
+        'Config Error: CENTRAL_BANK_URL or API_KEY is undefined.',
       );
     }
   }
@@ -67,19 +71,28 @@ export class CentralBankService {
     return {
       'x-api-key': this.centralBankApiKey,
       'x-environment': this.centralBankEnvironment,
+      'Content-Type': 'application/json',
     };
   }
 
-  async registerTransaction(data: RegisterTransactionDto): Promise<any> {
+  async registerTransaction(
+    data: RegisterTransactionDto,
+  ): Promise<TransactionResponse> {
     try {
       const response = await firstValueFrom(
-        this.httpService.post(`${this.centralBankApiUrl}/transactions`, data, {
-          headers: this.getHeaders(),
-        }),
+        this.httpService.post<TransactionResponse>(
+          `${this.centralBankApiUrl}/transactions`,
+          data,
+          {
+            headers: this.getHeaders(),
+          },
+        ),
       );
       return response.data;
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (error instanceof AxiosError && error.response) {
+        // Log para ver por qué rebota la transacción
+        console.error('❌ Error Transacción BC:', error.response.data);
         throw error;
       }
       throw new InternalServerErrorException(
@@ -88,18 +101,25 @@ export class CentralBankService {
     }
   }
 
-  async getTransactions(): Promise<any[]> {
+  async getTransactions(): Promise<TransactionResponse[]> {
     try {
       const response = await firstValueFrom(
-        this.httpService.get(`${this.centralBankApiUrl}/transactions`, {
-          headers: this.getHeaders(),
-        }),
+        this.httpService.get<TransactionResponse[]>(
+          `${this.centralBankApiUrl}/transactions`,
+          {
+            headers: this.getHeaders(),
+          },
+        ),
       );
       return response.data;
-    } catch (error: any) {
+    } catch (error: unknown) {
+      const axiosError = error as AxiosError<{
+        message?: string;
+        error?: string;
+      }>;
       console.error(
-        'Error al obtener transacciones del Banco Central:',
-        error.response?.data || error.message,
+        '❌ Error al obtener transacciones:',
+        axiosError.response?.data || axiosError.message,
       );
       throw new InternalServerErrorException(
         'Error al listar transacciones del Banco Central',
@@ -107,35 +127,38 @@ export class CentralBankService {
     }
   }
 
-  async findPersonByAlias(alias: string): Promise<any> {
+  async findPersonByAlias(alias: string): Promise<PersonResponse | null> {
     try {
       const response = await firstValueFrom(
-        this.httpService.get(
+        this.httpService.get<PersonResponse>(
           `${this.centralBankApiUrl}/persons/alias/${alias}`,
-          {
-            headers: this.getHeaders(),
-          },
+          { headers: this.getHeaders() },
         ),
       );
       return response.data;
-    } catch (error: any) {
-      if (error.response?.status === 404) return null;
+    } catch (error: unknown) {
+      if (error instanceof AxiosError && error.response?.status === 404)
+        return null;
       throw new InternalServerErrorException(
         'Error al consultar Alias en Banco Central',
       );
     }
   }
 
-  async findPersonByCbu(cbu: string): Promise<any> {
+  async findPersonByCbu(cbu: string): Promise<PersonResponse | null> {
     try {
       const response = await firstValueFrom(
-        this.httpService.get(`${this.centralBankApiUrl}/persons/${cbu}`, {
-          headers: this.getHeaders(),
-        }),
+        this.httpService.get<PersonResponse>(
+          `${this.centralBankApiUrl}/persons/${cbu}`,
+          {
+            headers: this.getHeaders(),
+          },
+        ),
       );
       return response.data;
-    } catch (error: any) {
-      if (error.response?.status === 404) return null;
+    } catch (error: unknown) {
+      if (error instanceof AxiosError && error.response?.status === 404)
+        return null;
       throw new InternalServerErrorException(
         'Error al consultar CBU en Banco Central',
       );
@@ -145,21 +168,34 @@ export class CentralBankService {
   async registerPerson(data: RegisterPersonDto): Promise<PersonResponse> {
     try {
       const response = await firstValueFrom(
-        this.httpService.post(`${this.centralBankApiUrl}/persons`, data, {
-          headers: this.getHeaders(),
-        }),
+        this.httpService.post<PersonResponse>(
+          `${this.centralBankApiUrl}/persons`,
+          data,
+          {
+            headers: this.getHeaders(),
+          },
+        ),
       );
       return response.data;
-    } catch (error: any) {
-      if (error.response?.status === 409) {
-        throw new BadRequestException('El DNI ya se encuentra registrado');
-      }
-      if (error.response) {
+    } catch (error: unknown) {
+      if (error instanceof AxiosError && error.response) {
+        const status = error.response.status;
+        const responseData = error.response.data as {
+          message?: string;
+          error?: string;
+        };
+
+        console.error('❌ Error Registro Persona BC:', responseData);
+
+        if (status === 409) {
+          throw new BadRequestException('El DNI ya se encuentra registrado');
+        }
+
         const message =
-          error.response.data?.error ||
-          error.response.data?.message ||
-          'Error al registrar persona en el Banco Central';
-        throw new HttpException(message, error.response.status);
+          responseData?.error ||
+          responseData?.message ||
+          'Error al registrar persona';
+        throw new HttpException(message, status);
       }
       throw new InternalServerErrorException(
         'Error al registrar persona en el Banco Central',

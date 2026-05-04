@@ -4,7 +4,7 @@ import { Account } from '../../accounts/entities/account.entity';
 @Entity('users')
 export class User {
   @PrimaryColumn()
-  id: string; // Aquí guardamos el 'user_2...' de Clerk
+  id: string; // ID de Clerk
 
   @Column({ unique: true })
   email: string;

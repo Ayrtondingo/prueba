@@ -9,18 +9,13 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe());
 
   app.enableCors({
-    origin: [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://127.0.0.1:3000',
-      'http://127.0.0.1:3001',
-    ],
+    origin: '*', // Permite que el frontend conecte sin problemas
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
 
-  await app.listen(4000);
-  console.log('Backend corriendo en: http://localhost:4000/api');
+  // USAMOS EL PUERTO 4001 PARA EVITAR EL ERROR EADDRINUSE DEL 4000
+  await app.listen(4001);
+  console.log(`🚀 Backend corriendo en: http://localhost:4001/api`);
 }
-
 bootstrap();

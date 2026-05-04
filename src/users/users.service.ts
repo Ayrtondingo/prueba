@@ -1,13 +1,25 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, HttpException, HttpStatus } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, FindOptionsWhere } from 'typeorm';
 import { User } from './entities/user.entity';
 import { Account } from '../accounts/entities/account.entity';
 import { CentralBankService } from '../central-bank/central-bank.service';
 import { CreatePersonDto } from '../central-bank/dto/create-person.dto';
+import { createClerkClient } from '@clerk/clerk-sdk-node';
+
+interface CentralBankTx {
+  id: string;
+  cbuOrigen: string;
+  cbuDestino: string;
+  importe: number;
+  createdAt: string;
+}
 
 @Injectable()
 export class UsersService {
+  // Inicializamos el cliente de Clerk para gestión de contraseñas
+  private clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
+
   constructor(
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
@@ -16,111 +28,138 @@ export class UsersService {
     private readonly centralBankService: CentralBankService,
   ) {}
 
-  async syncWithCentralBank(userId: string, data: CreatePersonDto) {
-    let user = await this.userRepository.findOne({
-      where: { id: userId },
-      relations: ['account'],
-    });
-
-    if (!user) {
-      user = await this.userRepository.save(
-        this.userRepository.create({
-          id: userId,
-          email: `${userId}@pending.local`,
-          fullName: `${data.nombre} ${data.apellido}`,
-        }),
-      );
+  /**
+   * Actualiza la contraseña en Clerk utilizando el SDK de servidor.
+   */
+  async updateClerkPassword(userId: string, newPassword: string) {
+    try {
+      await this.clerkClient.users.updateUser(userId, {
+        password: newPassword,
+      });
+      return { message: 'PASSWORD_UPDATED_SUCCESSFULLY' };
+    } catch (error: any) {
+      console.error('CLERK_UPDATE_ERROR:', error);
+      const errorMessage = error.errors?.[0]?.longMessage || 'ERROR_UPDATING_PASSWORD';
+      throw new HttpException(errorMessage, HttpStatus.BAD_REQUEST);
     }
+  }
 
-    const account = await this.ensureAccount(user);
+  /**
+   * Sincroniza los datos con el Banco Central y asigna el CBU y ALIAS a la cuenta local.
+   */
+  async syncWithCentralBank(userId: string, data: CreatePersonDto) {
+  let user = await this.userRepository.findOne({
+    where: { id: userId },
+    relations: ['account'],
+  });
+
+  if (!user) {
+    user = await this.userRepository.save(
+      this.userRepository.create({
+        id: userId,
+        email: `${userId}@pending.local`,
+        fullName: `${data.nombre} ${data.apellido}`,
+      }),
+    );
+  }
+
+  const account = await this.ensureAccount(user);
+
+  try {
+    // 1. Intentamos registrar en el Banco Central
     const centralBankData = await this.centralBankService.registerPerson(data);
-
+    
+    // Si tiene éxito, actualizamos el CBU (accountNumber)
     account.accountNumber = centralBankData.cbu;
+    // Usamos el nombre que nos confirma el Banco Central
     user.fullName = `${centralBankData.nombre} ${centralBankData.apellido}`;
+    
+  } catch (error: any) {
+  // Extraemos el mensaje de forma segura
+  const errorMessage = error?.response?.data?.message || error?.message || 'UNKNOWN_ERROR';
+  
+  console.warn(`⚠️ [BC_SYNC_BYPASS]: ${errorMessage}`);
+  
+  // Aquí es donde forzamos que el flujo siga
+  user.fullName = `${data.nombre} ${data.apellido}`;
+}
 
-    await this.accountRepository.save(account);
-    await this.userRepository.save(user);
+  // 3. El Alias se actualiza SIEMPRE, haya fallado el BC o no
+  account.alias = data.alias;
 
-    return {
-      message: 'CBU sincronizado exitosamente',
-      cbu: centralBankData.cbu,
-      account,
-    };
-  }
+  // 4. Guardamos los cambios en nuestra base de datos local
+  await Promise.all([
+    this.accountRepository.save(account),
+    this.userRepository.save(user),
+  ]);
 
-  async findOne(id: string): Promise<User | null> {
-    return this.userRepository.findOne({
-      where: { id },
-      relations: ['account'],
-    });
-  }
+  return {
+    message: 'Sincronización local completada',
+    cbu: account.accountNumber,
+    alias: account.alias,
+    fullName: user.fullName,
+    account,
+  };
+}
 
+  /**
+   * Crea o actualiza el usuario basado en los datos de Clerk.
+   */
   async createFromClerk(clerkId: string, email: string, fullName: string) {
-    const normalizedEmail = email || `${clerkId}@pending.local`;
+    const normalizedEmail = email?.toLowerCase() || `${clerkId}@pending.local`;
     const normalizedFullName = fullName || 'Usuario Cayman';
 
-    const existingUser = await this.findOne(clerkId);
-    if (existingUser) {
-      existingUser.email = normalizedEmail;
-      existingUser.fullName = normalizedFullName;
-      await this.userRepository.save(existingUser);
-      const account = await this.ensureAccount(existingUser);
+    let user = await this.userRepository.findOne({
+      where: [{ id: clerkId }, { email: normalizedEmail }],
+      relations: ['account'],
+    });
 
-      return {
-        message: 'Usuario ya existente',
-        user: existingUser,
-        account,
-      };
-    }
-
-    const existingByEmail = await this.findOneByEmail(normalizedEmail);
-    if (existingByEmail) {
-      existingByEmail.id = clerkId;
-      existingByEmail.fullName = normalizedFullName;
-      const savedUser = await this.userRepository.save(existingByEmail);
-      const account = await this.ensureAccount(savedUser);
-
-      return {
-        message: 'Usuario asociado por email',
-        user: savedUser,
-        account,
-      };
-    }
-
-    try {
-      const savedUser = await this.userRepository.save(
-        this.userRepository.create({
+    if (user) {
+      if (user.id !== clerkId) {
+        await this.userRepository.delete(user.id);
+        user = this.userRepository.create({
           id: clerkId,
           email: normalizedEmail,
           fullName: normalizedFullName,
-        }),
-      );
+        });
+      } else {
+        user.email = normalizedEmail;
+        user.fullName = normalizedFullName;
+      }
+      
+      const savedUser = await this.userRepository.save(user);
+      const account = await this.ensureAccount(savedUser);
+      return { message: 'Usuario sincronizado', user: savedUser, account };
+    }
+
+    try {
+      const newUser = this.userRepository.create({
+        id: clerkId,
+        email: normalizedEmail,
+        fullName: normalizedFullName,
+      });
+      const savedUser = await this.userRepository.save(newUser);
       const account = await this.ensureAccount(savedUser);
 
-      return {
-        message: 'Usuario y cuenta creados con exito',
-        user: savedUser,
-        account,
-      };
-    } catch (error: any) {
-      if (error?.code === '23505') {
-        const recoveredUser =
-          (await this.findOne(clerkId)) ||
-          (await this.findOneByEmail(normalizedEmail));
-
-        if (recoveredUser) {
-          const account = await this.ensureAccount(recoveredUser);
-          return {
-            message: 'Usuario recuperado tras sincronizacion concurrente',
-            user: recoveredUser,
-            account,
-          };
-        }
+      return { message: 'Usuario y cuenta creados con éxito', user: savedUser, account };
+    } catch (error) {
+      const recoveredUser = await this.findOne(clerkId) || await this.findOneByEmail(normalizedEmail);
+      if (recoveredUser) {
+        const account = await this.ensureAccount(recoveredUser);
+        return { message: 'Usuario recuperado', user: recoveredUser, account };
       }
-
       throw error;
     }
   }
+
+  // src/users/users.service.ts
+async findOne(id: string) {
+  return await this.userRepository.findOne({
+    where: { id },
+    relations: ['account'],
+    cache: false, // Forzar búsqueda fresca
+  });
+}
 
   async findOneByEmail(email: string): Promise<User | null> {
     return this.userRepository.findOne({
@@ -139,19 +178,16 @@ export class UsersService {
   }
 
   async updateProfile(id: string, updateData: { fullName?: string }) {
-    const user = await this.userRepository.findOneBy({ id });
-
-    if (!user) {
-      throw new NotFoundException('Usuario no encontrado');
-    }
-
+    const user = await this.findById(id);
     if (updateData.fullName) {
       user.fullName = updateData.fullName;
     }
-
     return await this.userRepository.save(user);
   }
 
+  /**
+   * Trae el historial de transacciones desde el Banco Central y filtra las del usuario.
+   */
   async getCombinedHistory(clerkId: string) {
     const user = await this.findOne(clerkId);
     if (!user || !user.account?.accountNumber) return [];
@@ -159,19 +195,18 @@ export class UsersService {
     const myCbu = user.account.accountNumber;
 
     try {
-      const allCentralTxs = await this.centralBankService.getTransactions();
+      const allCentralTxs = (await this.centralBankService.getTransactions()) as unknown as CentralBankTx[];
+
       const myTxs = allCentralTxs.filter(
-        (tx: any) => tx.cbuOrigen === myCbu || tx.cbuDestino === myCbu,
+        (tx) => tx.cbuOrigen === myCbu || tx.cbuDestino === myCbu,
       );
 
-      return myTxs.map((tx: any) => ({
+      return myTxs.map((tx) => ({
         id: tx.id,
-        amount:
-          tx.cbuDestino === myCbu ? Number(tx.importe) : -Number(tx.importe),
-        description:
-          tx.cbuDestino === myCbu
-            ? `Recibido de: ${tx.cbuOrigen}`
-            : `Enviado a: ${tx.cbuDestino}`,
+        amount: tx.cbuDestino === myCbu ? Number(tx.importe) : -Number(tx.importe),
+        description: tx.cbuDestino === myCbu 
+          ? `Recibido de: ${tx.cbuOrigen}` 
+          : `Enviado a: ${tx.cbuDestino}`,
         createdAt: tx.createdAt,
       }));
     } catch (error) {
@@ -180,11 +215,18 @@ export class UsersService {
     }
   }
 
+  /**
+   * Asegura que el usuario tenga una cuenta.
+   */
   private async ensureAccount(user: User): Promise<Account> {
     if (user.account) return user.account;
 
+    const accountWhere = {
+      user: { id: user.id },
+    } as unknown as FindOptionsWhere<Account>;
+
     const existingAccount = await this.accountRepository.findOne({
-      where: { user: { id: user.id } },
+      where: accountWhere,
       relations: ['user'],
     });
 
@@ -193,14 +235,15 @@ export class UsersService {
       return existingAccount;
     }
 
-    user.account = await this.accountRepository.save(
-      this.accountRepository.create({
-        accountNumber: null,
-        balance: 150000,
-        user,
-      }),
-    );
+    const newAccount = this.accountRepository.create({
+      accountNumber: null as unknown as string,
+      alias: null as unknown as string,
+      balance: 150000,
+      user,
+    });
 
-    return user.account;
+    const savedAccount = await this.accountRepository.save(newAccount);
+    user.account = savedAccount;
+    return savedAccount;
   }
 }

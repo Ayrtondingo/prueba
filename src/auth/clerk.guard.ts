@@ -5,6 +5,12 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createClerkClient } from '@clerk/clerk-sdk-node';
+import { Request } from 'express';
+
+// Definimos la interfaz para el request extendido
+interface AuthenticatedRequest extends Request {
+  user?: { id: string };
+}
 
 @Injectable()
 export class ClerkAuthGuard implements CanActivate {
@@ -13,7 +19,9 @@ export class ClerkAuthGuard implements CanActivate {
   });
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    if (!process.env.CLERK_SECRET_KEY) {
+    const secretKey = process.env.CLERK_SECRET_KEY;
+
+    if (!secretKey) {
       console.error(
         '--- ERROR: CLERK_SECRET_KEY no esta configurada en el backend ---',
       );
@@ -22,7 +30,7 @@ export class ClerkAuthGuard implements CanActivate {
       );
     }
 
-    const request = context.switchToHttp().getRequest();
+    const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     const authHeader = request.headers.authorization;
 
     if (!authHeader) {
@@ -30,7 +38,8 @@ export class ClerkAuthGuard implements CanActivate {
       throw new UnauthorizedException('No se envio el token');
     }
 
-    const token = authHeader.split(' ')[1];
+    const parts = authHeader.split(' ');
+    const token = parts.length === 2 ? parts[1] : null;
 
     if (
       !token ||
@@ -44,18 +53,28 @@ export class ClerkAuthGuard implements CanActivate {
     }
 
     try {
+      // verifyToken devuelve un payload con la propiedad 'sub' (el ID de usuario)
       const decoded = await this.clerkClient.verifyToken(token);
+
       request.user = { id: decoded.sub };
       return true;
-    } catch (err: any) {
+    } catch (err: unknown) {
+      // Manejo seguro del error de tipo 'unknown'
+      const error = err as {
+        message?: string;
+        code?: string;
+        errors?: Array<{ code: string }>;
+      };
+
       console.error('--- ERROR DE VALIDACION CLERK ---');
-      console.error('Mensaje:', err?.message);
+      console.error('Mensaje:', error.message);
       console.error(
         'Codigo:',
-        err?.code || err?.errors?.[0]?.code || 'sin_codigo',
+        error.code || error.errors?.[0]?.code || 'sin_codigo',
       );
+
       throw new UnauthorizedException(
-        'Token de Clerk invalido. Cierra sesion, vuelve a entrar y verifica que NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY y CLERK_SECRET_KEY pertenezcan a la misma app de Clerk.',
+        'Token de Clerk invalido. Cierra sesion, vuelve a entrar y verifica las llaves de Clerk.',
       );
     }
   }

@@ -17,6 +17,10 @@ export class Account {
   @Column({ nullable: true })
   accountNumber: string;
 
+  // --- AGREGAMOS ESTA LÍNEA PARA EL ALIAS ---
+  @Column({ nullable: true })
+  alias: string;
+
   @Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
   balance: number;
 

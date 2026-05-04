@@ -12,6 +12,19 @@ import {
 } from '@nestjs/common';
 import { TransactionsService } from './transactions.service';
 import { ClerkAuthGuard } from '../auth/clerk.guard';
+import { Request as ExpressRequest } from 'express';
+
+// Definimos la interfaz para reconocer req.user
+interface RequestWithUser extends ExpressRequest {
+  user: { id: string };
+}
+
+// Definimos un DTO para el cuerpo de la transferencia
+interface TransferDto {
+  cbuDestino: string;
+  monto: number;
+  motivo?: string;
+}
 
 @Controller('transactions')
 @UseGuards(ClerkAuthGuard)
@@ -20,10 +33,8 @@ export class TransactionsController {
 
   @Post('transfer')
   @HttpCode(HttpStatus.OK)
-  async transfer(
-    @Request() req,
-    @Body() body: { cbuDestino: string; monto: number; motivo?: string },
-  ) {
+  async transfer(@Request() req: RequestWithUser, @Body() body: TransferDto) {
+    // TypeScript ahora sabe que req.user.id es un string
     const userId = req.user.id;
 
     return this.transactionsService.createTransfer(
@@ -35,7 +46,7 @@ export class TransactionsController {
   }
 
   @Get('history')
-  async getHistory(@Request() req) {
+  async getHistory(@Request() req: RequestWithUser) {
     const userId = req.user.id;
     return this.transactionsService.getLocalHistory(userId);
   }

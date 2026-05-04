@@ -6,10 +6,17 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, FindOptionsWhere } from 'typeorm';
 import { Transaction, TransactionType } from './entities/transaction.entity';
 import { Account } from '../accounts/entities/account.entity';
-import { CentralBankService } from '../central-bank/central-bank.service'; // Asegúrate de que la ruta sea correcta
+import { CentralBankService } from '../central-bank/central-bank.service';
+import { AxiosError } from 'axios';
+
+// Interfaz para el error que devuelve el Banco Central
+interface CentralBankErrorData {
+  error?: string;
+  message?: string;
+}
 
 @Injectable()
 export class TransactionsService {
@@ -25,10 +32,10 @@ export class TransactionsService {
   async createTransfer(
     clerkId: string,
     receiverCbu: string,
-    amount: number,
+    amountInput: number,
     motivo?: string,
   ) {
-    amount = Number(amount);
+    const amount = Number(amountInput);
 
     // Validaciones
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -46,9 +53,13 @@ export class TransactionsService {
     await queryRunner.startTransaction();
 
     try {
-      // Buscar cuenta del remitente
+      // CORRECCIÓN DEFINITIVA: Usamos unknown para resetear el tipo antes de FindOptionsWhere
+      const senderWhere = {
+        user: { id: clerkId },
+      } as unknown as FindOptionsWhere<Account>;
+
       const senderAccount = await queryRunner.manager.findOne(Account, {
-        where: { user: { id: clerkId } },
+        where: senderWhere,
         relations: ['user'],
       });
 
@@ -58,39 +69,40 @@ export class TransactionsService {
 
       const senderBalance = Number(senderAccount.balance);
 
-      // Validar que no se envíe a su propia cuenta
       if (senderAccount.accountNumber === cleanCbu) {
         throw new BadRequestException(
           'No puedes transferir a tu propia cuenta',
         );
       }
 
-      // Validar saldo suficiente
       if (senderBalance < amount) {
         throw new BadRequestException('Saldo insuficiente');
       }
 
       try {
-        // Llamada al banco central
         await this.centralBankService.registerTransaction({
           cbuOrigen: senderAccount.accountNumber,
           cbuDestino: cleanCbu,
           importe: amount,
           saldoOrigen: senderBalance,
         });
-      } catch (cbError: any) {
-        const errorMessage =
-          cbError.response?.data?.error ||
-          cbError.response?.data?.message ||
-          'Rechazado por el Banco Central';
-        // Si el banco central devuelve error de saldo, usamos 422 según su spec
-        if (cbError.response?.status === 422) {
-          throw new UnprocessableEntityException(errorMessage);
+      } catch (cbError: unknown) {
+        if (cbError instanceof AxiosError) {
+          const data = cbError.response?.data as CentralBankErrorData;
+          const errorMessage =
+            data?.error || data?.message || 'Rechazado por el Banco Central';
+
+          if (cbError.response?.status === 422) {
+            throw new UnprocessableEntityException(errorMessage);
+          }
+          throw new BadRequestException(errorMessage);
         }
-        throw new BadRequestException(errorMessage);
+        throw new InternalServerErrorException(
+          'Error de comunicación con el Banco Central',
+        );
       }
 
-      // Actualizar saldo local del remitente
+      // Actualizar saldo local
       senderAccount.balance = Number((senderBalance - amount).toFixed(2));
       await queryRunner.manager.save(senderAccount);
 
@@ -106,19 +118,17 @@ export class TransactionsService {
 
       const savedTransaction = await queryRunner.manager.save(transaction);
 
-      // Buscar cuenta del receptor (si existe en nuestro sistema)
+      // Buscar cuenta del receptor local
       const receiverAccount = await queryRunner.manager.findOne(Account, {
         where: { accountNumber: cleanCbu },
       });
 
-      // Si el receptor existe en nuestro sistema, acreditarle
       if (receiverAccount) {
         receiverAccount.balance = Number(
           (Number(receiverAccount.balance) + amount).toFixed(2),
         );
         await queryRunner.manager.save(receiverAccount);
 
-        // Registrar transacción de recepción
         const receiveTransaction = queryRunner.manager.create(Transaction, {
           amount: amount,
           type: TransactionType.TRANSFER,
@@ -139,18 +149,22 @@ export class TransactionsService {
         amount: amount,
         destinationCbu: cleanCbu,
       };
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (queryRunner.isTransactionActive) {
         await queryRunner.rollbackTransaction();
       }
+
       if (
         error instanceof BadRequestException ||
         error instanceof NotFoundException ||
         error instanceof UnprocessableEntityException
-      )
+      ) {
         throw error;
+      }
+
+      const err = error as Error;
       throw new InternalServerErrorException(
-        error.message || 'Error crítico en el servidor',
+        err.message || 'Error crítico en el servidor',
       );
     } finally {
       await queryRunner.release();
@@ -158,8 +172,13 @@ export class TransactionsService {
   }
 
   async getLocalHistory(clerkId: string) {
+    // CORRECCIÓN DEFINITIVA: Casting doble para evitar Unsafe assignment
+    const historyWhere = {
+      account: { user: { id: clerkId } },
+    } as unknown as FindOptionsWhere<Transaction>;
+
     return await this.transactionRepository.find({
-      where: { account: { user: { id: clerkId } } },
+      where: historyWhere,
       order: { createdAt: 'DESC' },
       take: 50,
     });
