@@ -15,6 +15,13 @@ interface CentralBankTx {
   createdAt: string;
 }
 
+const buildFallbackCbu = (dni: string) => {
+  const cleanDni = String(dni || '').replace(/\D/g, '').slice(-8).padStart(8, '0');
+  return `00100014${cleanDni}0000105`;
+};
+
+const isValidCbu = (cbu?: string | null) => Boolean(cbu && /^\d{22}$/.test(cbu));
+
 @Injectable()
 export class UsersService {
   // Inicializamos el cliente de Clerk para gestión de contraseñas
@@ -71,8 +78,14 @@ export class UsersService {
     
     // Si tiene éxito, actualizamos el CBU (accountNumber)
     account.accountNumber = centralBankData.cbu;
-    // Usamos el nombre que nos confirma el Banco Central
+    // Usamos los datos que nos confirma el Banco Central
     user.fullName = `${centralBankData.nombre} ${centralBankData.apellido}`;
+    account.alias = centralBankData.alias ?? account.alias;
+
+    if (data.alias) {
+      await this.centralBankService.updateAlias(centralBankData.cbu, data.alias);
+      account.alias = data.alias;
+    }
     
   } catch (error: any) {
   // Extraemos el mensaje de forma segura
@@ -81,11 +94,15 @@ export class UsersService {
   console.warn(`⚠️ [BC_SYNC_BYPASS]: ${errorMessage}`);
   
   // Aquí es donde forzamos que el flujo siga
+  if (!isValidCbu(account.accountNumber)) {
+    account.accountNumber = buildFallbackCbu(data.dni);
+  }
   user.fullName = `${data.nombre} ${data.apellido}`;
 }
 
-  // 3. El Alias se actualiza SIEMPRE, haya fallado el BC o no
-  account.alias = data.alias;
+  if (data.alias) {
+    account.alias = data.alias;
+  }
 
   // 4. Guardamos los cambios en nuestra base de datos local
   await Promise.all([
@@ -183,6 +200,24 @@ async findOne(id: string) {
       user.fullName = updateData.fullName;
     }
     return await this.userRepository.save(user);
+  }
+
+  async updateAlias(clerkId: string, alias: string) {
+    const user = await this.findById(clerkId);
+    const account = await this.ensureAccount(user);
+
+    if (!isValidCbu(account.accountNumber)) {
+      throw new HttpException('CBU_NOT_LINKED', HttpStatus.BAD_REQUEST);
+    }
+
+    await this.centralBankService.updateAlias(account.accountNumber, alias);
+    account.alias = alias;
+    await this.accountRepository.save(account);
+
+    return {
+      message: 'ALIAS_UPDATED_SUCCESSFULLY',
+      alias,
+    };
   }
 
   /**

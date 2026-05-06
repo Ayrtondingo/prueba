@@ -64,6 +64,15 @@ export class UsersController {
     return await this.usersService.syncWithCentralBank(clerkId, data);
   }
 
+  @Post('alias')
+  @UseGuards(ClerkAuthGuard)
+  async updateAlias(
+    @Req() req: RequestWithUser,
+    @Body('alias') alias: string,
+  ) {
+    return await this.usersService.updateAlias(req.user.id, alias);
+  }
+
   // ... tus otros imports
   @Post('change-password')
   @UseGuards(ClerkAuthGuard)

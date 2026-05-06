@@ -34,6 +34,7 @@ interface PersonResponse {
   nombre: string;
   apellido: string;
   dni: string;
+  alias?: string | null;
 }
 
 @Injectable()
@@ -199,6 +200,35 @@ export class CentralBankService {
       }
       throw new InternalServerErrorException(
         'Error al registrar persona en el Banco Central',
+      );
+    }
+  }
+
+  async updateAlias(cbu: string, alias: string): Promise<void> {
+    try {
+      await firstValueFrom(
+        this.httpService.put(
+          `${this.centralBankApiUrl}/persons/${cbu}/alias`,
+          { alias },
+          {
+            headers: this.getHeaders(),
+          },
+        ),
+      );
+    } catch (error: unknown) {
+      if (error instanceof AxiosError && error.response) {
+        const responseData = error.response.data as {
+          message?: string;
+          error?: string;
+        };
+        const message =
+          responseData?.error ||
+          responseData?.message ||
+          'Error al actualizar alias';
+        throw new HttpException(message, error.response.status);
+      }
+      throw new InternalServerErrorException(
+        'Error al comunicarse con el Banco Central para actualizar alias',
       );
     }
   }
